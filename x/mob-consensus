@@ -30,6 +30,11 @@ then
     git mergetool -t vimdiff 
 fi
 git difftool -t vimdiff HEAD
-git commit -t $msg
-git push
+
+# XXX not working while a merge is in progress...
+# git commit -t $msg
+# git push
+
+# ...so let's do this manually for now:
+echo include this file in your commit message: $msg
 
