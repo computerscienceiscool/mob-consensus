@@ -8,34 +8,53 @@ then
     exit 1
 fi
 
+repo_root=$(git rev-parse --show-toplevel)
 current_branch=$(git rev-parse --abbrev-ref HEAD)
+
+if ! echo $current_branch | egrep "^$USER/"
+then
+    echo "you aren't on a '$USER/' branch"
+    exit 1
+fi
 
 msg=/tmp/mob-consensus.msg
 
-# printf "mob-consensus merge from $other_branch onto $current_branch\n\n" > $msg
-printf "\n\n" > $msg
+printf "mob-consensus merge from $other_branch onto $current_branch\n\n" > $msg
+# printf "\n\n" > $msg
 
+set -x
 git log ..$other_branch --pretty=format:"Co-authored-by: %an <%ae>" \
     | grep -v $(git config --get user.email) \
     | sort -u >> $msg
 
 if [ -n "$(git status --porcelain)" ]
 then 
-  echo you have uncommitted changes
-  exit 1
+    set +x
+    echo you have uncommitted changes
+    exit 1
 fi
 
-set -x
+git fetch 
+
 if ! git merge --no-commit --no-ff $other_branch
 then
+    # deal with merge conflicts
     git mergetool -t vimdiff 
 fi
+
+# commit during merge will ignore `-t`, so we replace the
+# default commit message here as well
+cp $msg $repo_root/.git/MERGE_MSG
+
+# review all changes
 git difftool -t vimdiff HEAD
 
-# XXX not working while a merge is in progress...
-# git commit -t $msg
-# git push
+if ! git commit -t $msg
+then
+    set +x
+    echo "don't forget to push"
+    exit 1
+fi
 
-# ...so let's do this manually for now:
-echo include this file in your commit message: $msg
+git push
 
