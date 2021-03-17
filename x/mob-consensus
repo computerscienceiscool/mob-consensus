@@ -44,6 +44,7 @@ fi
 
 # commit during merge will ignore `-t`, so we replace the
 # default commit message here as well
+# XXX might instead want to use -m or -F flag on the above merge 
 cp $msg $repo_root/.git/MERGE_MSG
 
 # review all changes
