@@ -2,18 +2,30 @@
 
 other_branch=$1
 
-if [ -z "$other_branch" ]
-then
-    echo usage: $0 other_branch
-    exit 1
-fi
-
 repo_root=$(git rev-parse --show-toplevel)
 current_branch=$(git rev-parse --abbrev-ref HEAD)
 
-if ! echo $current_branch | egrep "^$USER/"
+if ! echo $current_branch | egrep -q "^$USER/"
 then
     echo "you aren't on a '$USER/' branch"
+    exit 1
+fi
+
+if [ -z "$other_branch" ]
+then
+    echo
+    echo Usage: $0 other_branch
+    echo
+    echo "Related branches and their diffs (if any):"
+    echo
+
+    twig=$(basename $current_branch)
+    for b in $(git branch -a | egrep "/$twig$" | grep -v $current_branch)
+    do 
+        echo $b
+        git diff --stat ...${b} 
+    done
+
     exit 1
 fi
 
