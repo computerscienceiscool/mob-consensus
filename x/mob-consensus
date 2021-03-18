@@ -24,10 +24,20 @@ then
     twig=$(basename $current_branch)
     for b in $(git branch -a | egrep "/$twig$" | grep -v $current_branch)
     do 
-        echo $b
-        git diff --stat ...${b} 
+        ahead=$(git diff --shortstat ...${b})
+        behind=$(git diff --shortstat ${b}...)
+        if [ -n "$ahead" ]
+        then
+            echo $b is ahead:
+            git diff --stat ...${b} 
+        fi
+        if [ -n "$behind" ]
+        then
+            printf "%30s is behind: %s\n" $b "$behind"
+        fi
+
         # also see https://git.seveas.net/previewing-a-merge-result.html for a
-        # different approach:
+        # different approach with more detailed diffs:
         # git merge-tree $(git merge-base HEAD develop) HEAD develop
     done
 
