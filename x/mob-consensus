@@ -90,8 +90,9 @@ then
         behind=$(git diff --shortstat ${b}...)
         if [ -n "$ahead" ]
         then
-            printf "%40s is ahead:\n" $b 
-            git diff --stat ...${b} 
+            # printf "%40s is ahead:\n" $b 
+            # git diff --stat ...${b} 
+            printf "%40s is ahead: %s\n" $b "$ahead"
         elif [ -n "$behind" ]
         then
             printf "%40s is behind: %s\n" $b "$behind"
