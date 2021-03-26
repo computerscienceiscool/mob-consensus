@@ -39,7 +39,7 @@ ck_user() {
 unset force
 unset base_branch
 unset nopush
-while getopts Fnb: opt 
+while getopts Fhnb: opt 
 do
     case $opt in
         F)
@@ -51,6 +51,10 @@ do
             ;;
         n)
             nopush=y
+            ;;
+        h)
+            usage
+            exit 0
             ;;
         *)
             echo
