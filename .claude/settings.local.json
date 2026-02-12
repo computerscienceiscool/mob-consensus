@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /home/jj/lab/mob-consensus log --oneline -10)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git filter-branch:*)",
+      "Bash(GOTOOLCHAIN=auto go build:*)"
+    ]
+  }
+}
