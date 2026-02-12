@@ -16,7 +16,7 @@ This list is sorted by priority (not number). TODO numbers are stable; do not re
 
 - [x] 007-JJ - ensureClean writes to os.Stdout directly (`TODO/007-JJ-ensureClean-writes-to-os-Stdout.md`)
 - [ ] 010-JJ - Push may fail without upstream tracking (`TODO/010-JJ-push-fails-without-upstream.md`)
-- [ ] 011-JJ - No validation of OTHER_BRANCH before merge (`TODO/011-JJ-no-other-branch-validation.md`)
+- [x] 011-JJ - No validation of OTHER_BRANCH before merge (`TODO/011-JJ-no-other-branch-validation.md`) - fixed by 008-JJ
 
 ## Low
 
