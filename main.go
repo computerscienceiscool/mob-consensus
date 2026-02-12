@@ -303,6 +303,60 @@ func printPushAdvice(ctx context.Context, w io.Writer, branch string) error {
 	return nil
 }
 
+// smartPush pushes the current branch, setting upstream if not already set
+func smartPush(ctx context.Context) error {
+	// Check if upstream tracking ref is configured
+	upstream, err := gitOutputTrimmed(ctx, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	if err == nil && upstream != "" {
+		// Upstream already set, do simple push
+		return gitRun(ctx, "push")
+	}
+
+	// No upstream set, need to push with -u
+	currentBranch, err := gitOutputTrimmed(ctx, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return err
+	}
+
+	// Get list of remotes
+	remotesOut, err := gitOutputTrimmed(ctx, "remote")
+	if err != nil {
+		// No remotes or can't list them, try bare push anyway
+		return gitRun(ctx, "push")
+	}
+
+	var remotes []string
+	for _, line := range strings.Split(remotesOut, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			remotes = append(remotes, line)
+		}
+	}
+
+	if len(remotes) == 0 {
+		// No remotes configured, try bare push anyway
+		return gitRun(ctx, "push")
+	}
+
+	// Choose best remote: prefer origin, fall back to only remote, or first remote
+	suggested := ""
+	for _, r := range remotes {
+		if r == "origin" {
+			suggested = "origin"
+			break
+		}
+	}
+	if suggested == "" && len(remotes) == 1 {
+		suggested = remotes[0]
+	}
+	if suggested == "" {
+		suggested = remotes[0]
+	}
+
+	// Push with upstream tracking
+	return gitRun(ctx, "push", "-u", suggested, currentBranch)
+}
+
 func runDiscovery(ctx context.Context, opts options, currentBranch string, stdout io.Writer) error {
 	if opts.commitDirty {
 		if err := ensureClean(ctx, opts, false, stdout); err != nil {
@@ -451,7 +505,7 @@ func runMerge(ctx context.Context, opts options, currentBranch string, stdout io
 		fmt.Fprintln(stdout, "skipping automatic push -- don't forget to push later")
 		return nil
 	}
-	return gitRun(ctx, "push")
+	return smartPush(ctx)
 }
 
 func ensureClean(ctx context.Context, opts options, requireClean bool, stdout io.Writer) error {
@@ -480,7 +534,7 @@ func ensureClean(ctx context.Context, opts options, requireClean bool, stdout io
 	if opts.noPush {
 		return nil
 	}
-	return gitRun(ctx, "push")
+	return smartPush(ctx)
 }
 
 func twigFromBranch(branch string) string {
