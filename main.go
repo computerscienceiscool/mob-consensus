@@ -225,7 +225,7 @@ func requireUserBranch(force bool, user, currentBranch string) error {
 }
 
 func runCreateBranch(ctx context.Context, opts options, user string, stdout io.Writer) error {
-	if err := ensureClean(ctx, opts, true); err != nil {
+	if err := ensureClean(ctx, opts, true, stdout); err != nil {
 		return err
 	}
 
@@ -305,7 +305,7 @@ func printPushAdvice(ctx context.Context, w io.Writer, branch string) error {
 
 func runDiscovery(ctx context.Context, opts options, currentBranch string, stdout io.Writer) error {
 	if opts.commitDirty {
-		if err := ensureClean(ctx, opts, false); err != nil {
+		if err := ensureClean(ctx, opts, false, stdout); err != nil {
 			return err
 		}
 	}
@@ -355,7 +355,7 @@ func diffStatusLine(branch, ahead, behind string) string {
 }
 
 func runMerge(ctx context.Context, opts options, currentBranch string, stdout io.Writer) error {
-	if err := ensureClean(ctx, opts, true); err != nil {
+	if err := ensureClean(ctx, opts, true, stdout); err != nil {
 		return err
 	}
 
@@ -443,7 +443,7 @@ func runMerge(ctx context.Context, opts options, currentBranch string, stdout io
 	return gitRun(ctx, "push")
 }
 
-func ensureClean(ctx context.Context, opts options, requireClean bool) error {
+func ensureClean(ctx context.Context, opts options, requireClean bool, stdout io.Writer) error {
 	status, err := gitOutputTrimmed(ctx, "status", "--porcelain")
 	if err != nil {
 		return err
@@ -452,7 +452,7 @@ func ensureClean(ctx context.Context, opts options, requireClean bool) error {
 		return nil
 	}
 
-	fmt.Fprintln(os.Stdout, "you have uncommitted changes")
+	fmt.Fprintln(stdout, "you have uncommitted changes")
 	if !opts.commitDirty {
 		if requireClean {
 			return errors.New("working tree is dirty (use -c to commit)")
