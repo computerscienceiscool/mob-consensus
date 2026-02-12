@@ -359,6 +359,17 @@ func runMerge(ctx context.Context, opts options, currentBranch string, stdout io
 		return err
 	}
 
+	// Resolve branch: try local first, then origin/<branch>
+	mergeTarget := opts.otherBranch
+	if _, err := gitOutput(ctx, "rev-parse", "--verify", opts.otherBranch); err != nil {
+		// Local branch doesn't exist, try origin/<branch>
+		remoteRef := "origin/" + opts.otherBranch
+		if _, err := gitOutput(ctx, "rev-parse", "--verify", remoteRef); err != nil {
+			return fmt.Errorf("branch %q not found locally or as %q", opts.otherBranch, remoteRef)
+		}
+		mergeTarget = remoteRef
+	}
+
 	mergeMsg, err := buildMergeMessage(ctx, opts.otherBranch, currentBranch)
 	if err != nil {
 		return err
@@ -395,7 +406,7 @@ func runMerge(ctx context.Context, opts options, currentBranch string, stdout io
 		return err
 	}
 
-	mergeErr := gitRun(ctx, "merge", "--no-commit", "--no-ff", opts.otherBranch)
+	mergeErr := gitRun(ctx, "merge", "--no-commit", "--no-ff", mergeTarget)
 	if mergeErr != nil {
 		if _, err := os.Stat(mergeHeadPath); err != nil {
 			if errors.Is(err, os.ErrNotExist) {

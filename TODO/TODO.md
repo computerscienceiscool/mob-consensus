@@ -4,7 +4,7 @@ This list is sorted by priority (not number). TODO numbers are stable; do not re
 
 ## Critical
 
-- [ ] 008-JJ - Merge doesn't auto-create local tracking branch (`TODO/008-JJ-merge-no-local-tracking-branch.md`)
+- [x] 008-JJ - Merge doesn't auto-create local tracking branch (`TODO/008-JJ-merge-no-local-tracking-branch.md`)
 
 ## High
 
