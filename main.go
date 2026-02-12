@@ -232,6 +232,25 @@ func runCreateBranch(ctx context.Context, opts options, user string, stdout io.W
 	twig := twigFromBranch(opts.baseBranch)
 	newBranch := user + "/" + twig
 	baseBranch := opts.baseBranch
+
+	// Check if branch already exists
+	existingBranches, err := gitOutput(ctx, "branch", "--list", newBranch)
+	if err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(existingBranches) != "" {
+		// Branch exists, switch to it
+		if err := gitRun(ctx, "checkout", newBranch); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout)
+		fmt.Fprintf(stdout, "Switched to existing branch '%s'\n", newBranch)
+		fmt.Fprintln(stdout, "Next: push your branch when you're ready.")
+		return printPushAdvice(ctx, stdout, newBranch)
+	}
+
+	// Branch doesn't exist, create it
 	if err := gitRun(ctx, "checkout", "-b", newBranch, baseBranch); err != nil {
 		return err
 	}

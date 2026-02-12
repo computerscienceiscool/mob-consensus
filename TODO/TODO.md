@@ -8,7 +8,7 @@ This list is sorted by priority (not number). TODO numbers are stable; do not re
 
 ## High
 
-- [ ] 005-JJ - Branch creation not idempotent (`TODO/005-JJ-branch-creation-not-idempotent.md`)
+- [x] 005-JJ - Branch creation not idempotent (`TODO/005-JJ-branch-creation-not-idempotent.md`)
 - [ ] 009-JJ - Merge state not cleaned up on error paths (`TODO/009-JJ-merge-state-not-cleaned-on-error.md`)
 - [x] 006-JJ - .lock file not in .gitignore (`TODO/006-JJ-lock-file-not-gitignored.md`)
 
