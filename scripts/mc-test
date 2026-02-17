@@ -1,0 +1,1042 @@
+#!/usr/bin/env bash
+set -euo pipefail
+set -f
+
+prog="mc-test"
+root_marker=".mc-test-root"
+
+usage() {
+  cat <<'EOF' >&2
+Usage:
+  mc-test init [--unsafe] REPO_PATH USERNAME
+  mc-test harness [--root DIR] [--users "alice bob carol"] [--twig TWIG] [--base BRANCH] [--noninteractive|--interactive]
+  mc-test run --root DIR [--scenario SCENARIO] [--users "alice bob carol"] [--twig TWIG] [--base BRANCH] [--noninteractive|--interactive]
+  mc-test all [--root DIR] [--users "alice bob carol"] [--twig TWIG] [--base BRANCH] [--noninteractive|--interactive]
+  mc-test coverage --root DIR
+
+Commands:
+  init     Configure repo-local git identity for a simulated user.
+  harness  Create a local bare "remote", seed it, build mob-consensus, and clone N users.
+  run      Run one scenario in an existing harness.
+  all      Run harness + scenarios (bootstrap, join, discovery, merge, plus deeper checks).
+  coverage Write coverage reports under the harness root (coverage.out, coverage.html, coverage.func.txt, coverage.total.txt, coverage.zero.txt, coverage.low.txt).
+
+Scenarios:
+  bootstrap  First user creates/pushes shared twig and personal branch.
+  join       Other users join from the shared twig and push their personal branches.
+  discovery  Create commits and assert ahead/behind/diverged output.
+  merge      Run a clean merge and then a no-op merge (with confirmation).
+  branch     Exercise `-b` idempotency and push advice.
+  dirty      Exercise dirty-tree failures and `-c` auto-commit flow.
+  smartpush  Exercise upstreamless push behavior (single vs multiple remotes).
+  multiremote-fetch  Exercise fetch selection and ambiguity errors.
+  converge   Multi-user file edits + merges; verify final trees have no diffs.
+
+Notes:
+  - USERNAME must not contain '@'. Email is set to USERNAME@example.com.
+  - In --noninteractive mode, mc-test configures git difftool/mergetool to be no-ops
+    and sets a temporary GIT_EDITOR to avoid opening an editor.
+  - Safety: by default, 'init' refuses to touch repos that are not under a harness root.
+    Use 'init --unsafe' only if you are sure REPO_PATH is a disposable test repo.
+
+Where it writes (harness layout): everything goes under the harness root ROOT:
+  - ROOT/remote.git (bare remote)
+  - ROOT/seed (seed worktree)
+  - ROOT/<user>/ (per-user clones, e.g. ROOT/alice)
+  - ROOT/mob-consensus (built binary used by scenarios)
+  - ROOT/mc-test.env, ROOT/git-editor.sh, ROOT/.mc-test-root (harness metadata + marker)
+  - ROOT/coverage.out, ROOT/coverage.html, ROOT/coverage.func.txt, ROOT/coverage.total.txt, ROOT/coverage.zero.txt, ROOT/coverage.low.txt (coverage outputs)
+  - ROOT/gocache, ROOT/gomodcache (Go build caches, so we don't write to your global caches)
+  - ROOT/gotmp (Go temp dir for builds/tools)
+
+Safety checks:
+  - harness refuses to run unless ROOT is an empty directory (prevents accidentally writing into e.g. $HOME).
+  - harness and run refuse if ROOT is inside the mob-consensus source repo.
+  - run refuses unless ROOT/.mc-test-root exists.
+  - mc-test.env is parsed, not sourced (no shell-eval of attacker-controlled files).
+  - init refuses to touch repos not under a harness root unless you pass init --unsafe.
+  - Usernames and twig/base names are validated (git check-ref-format) and usernames are restricted to a simple safe pattern.
+EOF
+}
+
+die() {
+  echo "$prog: $*" >&2
+  exit 2
+}
+
+run() {
+  echo "+ $*" >&2
+  "$@" 1>&2
+}
+
+run_maybe() {
+  echo "+ $*" >&2
+  "$@" 1>&2 || true
+}
+
+repo_root() {
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  (cd -- "$script_dir/.." && pwd)
+}
+
+dir_is_empty() {
+  local dir="$1"
+  [[ -d "$dir" ]] || return 1
+  local found
+  found="$(find "$dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" || return 1
+  [[ -z "$found" ]]
+}
+
+canonical_dir() {
+  local dir="$1"
+  (cd -- "$dir" && pwd -P)
+}
+
+assert_safe_branch_name() {
+  local what="$1"
+  local name="$2"
+  if [[ -z "$name" ]]; then
+    die "$what must not be empty"
+  fi
+  if ! git check-ref-format --branch "$name" >/dev/null 2>&1; then
+    die "$what is not a valid branch name: $name"
+  fi
+}
+
+assert_safe_username() {
+  local username="$1"
+  if [[ -z "$username" ]]; then
+    die "USERNAME must not be empty"
+  fi
+  if [[ "$username" == *"@"* ]]; then
+    die "USERNAME must not contain '@' (got: $username)"
+  fi
+  if [[ ! "$username" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+    die "USERNAME must match ^[A-Za-z0-9][A-Za-z0-9_-]*$ (got: $username)"
+  fi
+  if ! git check-ref-format --branch "$username/probe" >/dev/null 2>&1; then
+    die "USERNAME is not a valid branch prefix: $username"
+  fi
+}
+
+find_harness_root() {
+  local start="$1"
+  local dir
+  dir="$(canonical_dir "$start")"
+  while [[ "$dir" != "/" ]]; do
+    if [[ -f "$dir/$root_marker" ]]; then
+      echo "$dir"
+      return 0
+    fi
+    dir="$(dirname -- "$dir")"
+  done
+  return 1
+}
+
+mktemp_dir() {
+  local out
+  if out="$(mktemp -d 2>/dev/null)"; then
+    echo "$out"
+    return 0
+  fi
+  if out="$(mktemp -d -t mc-test.XXXXXX 2>/dev/null)"; then
+    echo "$out"
+    return 0
+  fi
+  return 1
+}
+
+write_editor() {
+  local editor_path="$1"
+  cat >"$editor_path" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+msg_file="${1:-}"
+if [[ -z "$msg_file" ]]; then
+  exit 0
+fi
+
+# If the file already has a non-comment, non-blank line, leave it alone.
+if grep -Eq '^[[:space:]]*[^#[:space:]]' "$msg_file"; then
+  exit 0
+fi
+
+{
+  echo "mc-test auto commit"
+  echo
+  cat "$msg_file" || true
+} >"$msg_file.tmp"
+mv "$msg_file.tmp" "$msg_file"
+EOF
+  chmod +x "$editor_path"
+}
+
+cmd_init() {
+  local unsafe="0"
+  if [[ "${1:-}" == "--unsafe" ]]; then
+    unsafe="1"
+    shift
+  fi
+
+  local repo_path="${1:-}"
+  local username="${2:-}"
+
+  if [[ -z "$repo_path" || -z "$username" ]]; then
+    usage
+    exit 2
+  fi
+
+  assert_safe_username "$username"
+
+  if ! git -C "$repo_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    die "not a git worktree: $repo_path"
+  fi
+
+  if [[ "$unsafe" != "1" ]]; then
+    if ! find_harness_root "$repo_path" >/dev/null 2>&1; then
+      die "refusing to modify non-harness repo (use: $prog init --unsafe REPO_PATH USERNAME)"
+    fi
+  fi
+
+  local email="$username@example.com"
+  run git -C "$repo_path" config --local user.name "$username"
+  run git -C "$repo_path" config --local user.email "$email"
+
+  echo "$prog: configured $repo_path" >&2
+  echo "  user.name  = $username" >&2
+  echo "  user.email = $email" >&2
+}
+
+configure_noninteractive_git() {
+  local repo_path="$1"
+  run git -C "$repo_path" config --local difftool.prompt false
+  run git -C "$repo_path" config --local mergetool.prompt false
+  run git -C "$repo_path" config --local difftool.vimdiff.cmd true
+  run git -C "$repo_path" config --local mergetool.vimdiff.cmd true
+}
+
+cmd_harness() {
+  local root=""
+  local users="alice bob carol"
+  local twig="feature-x"
+  local base="main"
+  local noninteractive="1"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --root)
+        root="${2:-}"; shift 2 ;;
+      --users)
+        users="${2:-}"; shift 2 ;;
+      --twig)
+        twig="${2:-}"; shift 2 ;;
+      --base)
+        base="${2:-}"; shift 2 ;;
+      --interactive)
+        noninteractive="0"; shift ;;
+      --noninteractive)
+        noninteractive="1"; shift ;;
+      -h|--help)
+        usage; exit 0 ;;
+      *)
+        die "unknown harness flag: $1" ;;
+    esac
+  done
+
+  assert_safe_branch_name "TWIG" "$twig"
+  assert_safe_branch_name "BASE" "$base"
+
+  if [[ -z "$root" ]]; then
+    root="$(mktemp_dir)" || die "mktemp failed; pass an explicit --root DIR"
+  fi
+  if [[ -e "$root" ]]; then
+    [[ -d "$root" ]] || die "--root exists but is not a directory: $root"
+    if ! dir_is_empty "$root"; then
+      die "--root must be an empty directory (refusing to write into: $root)"
+    fi
+  else
+    mkdir -p "$root"
+  fi
+
+  root="$(canonical_dir "$root")"
+
+  local remote="$root/remote.git"
+  local editor="$root/git-editor.sh"
+  local mc_bin="$root/mob-consensus"
+  local src_root
+  src_root="$(repo_root)"
+  src_root="$(canonical_dir "$src_root")"
+
+  if [[ "$root" == "$src_root" || "$root" == "$src_root/"* ]]; then
+    die "--root must not be inside the mob-consensus source repo ($src_root)"
+  fi
+
+  echo "$prog: harness root: $root" >&2
+  echo "  bare remote: $remote" >&2
+  echo "  seed repo:   $root/seed" >&2
+  echo "  user repos:  $root/<user> (e.g. $root/alice)" >&2
+
+  printf '%s\n' "mc-test harness root (safe to delete)" >"$root/$root_marker"
+
+  run git init --bare "$remote"
+  run git -C "$remote" symbolic-ref HEAD "refs/heads/$base"
+
+  run git clone "$remote" "$root/seed"
+  run git -C "$root/seed" config user.name Seed
+  run git -C "$root/seed" config user.email seed@example.com
+  run git -C "$root/seed" switch -c "$base"
+  echo hello >"$root/seed/README.md"
+  run git -C "$root/seed" add README.md
+  run git -C "$root/seed" commit -m "Seed"
+  run git -C "$root/seed" push -u origin "$base"
+
+  echo "$prog: building mob-consensus from $src_root" >&2
+  mkdir -p "$root/gocache" "$root/gomodcache" "$root/gotmp"
+  (cd "$src_root" && env GOCACHE="$root/gocache" GOMODCACHE="$root/gomodcache" GOTMPDIR="$root/gotmp" TMPDIR="$root/gotmp" go build -mod=readonly -o "$mc_bin" .) 1>&2
+
+  if [[ "$noninteractive" == "1" ]]; then
+    write_editor "$editor"
+  fi
+
+  for u in $users; do
+    assert_safe_username "$u"
+    run git clone "$remote" "$root/$u"
+    cmd_init "$root/$u" "$u"
+    if [[ "$noninteractive" == "1" ]]; then
+      configure_noninteractive_git "$root/$u"
+    fi
+  done
+
+  cat >"$root/mc-test.env" <<EOF
+ROOT=$root
+REMOTE=$remote
+MC=$mc_bin
+USERS=$users
+TWIG=$twig
+BASE=$base
+NONINTERACTIVE=$noninteractive
+EDITOR=$editor
+EOF
+
+  printf '%s\n' "$root"
+}
+
+read_env() {
+  local root="$1"
+  local env_file="$root/mc-test.env"
+  [[ -f "$env_file" ]] || die "missing harness metadata: $env_file"
+
+  local key val
+  while IFS='=' read -r key val; do
+    case "$key" in
+      ROOT) ROOT="$val" ;;
+      REMOTE) REMOTE="$val" ;;
+      MC) MC="$val" ;;
+      USERS) USERS="$val" ;;
+      TWIG) TWIG="$val" ;;
+      BASE) BASE="$val" ;;
+      NONINTERACTIVE) NONINTERACTIVE="$val" ;;
+      EDITOR) EDITOR="$val" ;;
+      ""|\#*) ;;
+      *)
+        die "unexpected key in $env_file: $key"
+        ;;
+    esac
+  done <"$env_file"
+}
+
+mc_run() {
+  local repo_path="$1"; shift
+  local mc_bin="$1"; shift
+  local editor="$1"; shift
+  local noninteractive="$1"; shift
+
+  if [[ "$noninteractive" == "1" ]]; then
+    (cd "$repo_path" && env GIT_EDITOR="$editor" "$mc_bin" "$@")
+  else
+    (cd "$repo_path" && "$mc_bin" "$@")
+  fi
+}
+
+mc_run_confirm() {
+  local repo_path="$1"; shift
+  local mc_bin="$1"; shift
+  local editor="$1"; shift
+  local noninteractive="$1"; shift
+
+  if [[ "$noninteractive" == "1" ]]; then
+    printf 'y\n' | (cd "$repo_path" && env GIT_EDITOR="$editor" "$mc_bin" "$@")
+  else
+    echo "$prog: interactive mode: when prompted, type 'y' to proceed" >&2
+    (cd "$repo_path" && "$mc_bin" "$@")
+  fi
+}
+
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  if ! grep -Fq "$needle" <<<"$haystack"; then
+    echo "$prog: expected output to contain: $needle" >&2
+    echo "$prog: output was:" >&2
+    echo "$haystack" >&2
+    exit 1
+  fi
+}
+
+assert_branch() {
+  local repo_path="$1"
+  local want="$2"
+  local got
+  got="$(git -C "$repo_path" branch --show-current)"
+  if [[ "$got" != "$want" ]]; then
+    die "expected current branch in $repo_path to be $want (got: $got)"
+  fi
+}
+
+assert_clean() {
+  local repo_path="$1"
+  local st
+  st="$(git -C "$repo_path" status --porcelain)"
+  if [[ -n "$st" ]]; then
+    echo "$prog: expected clean worktree in $repo_path, but got:" >&2
+    echo "$st" >&2
+    exit 1
+  fi
+}
+
+assert_file() {
+  local file_path="$1"
+  [[ -f "$file_path" ]] || die "expected file to exist: $file_path"
+}
+
+assert_dir() {
+  local dir_path="$1"
+  [[ -d "$dir_path" ]] || die "expected directory to exist: $dir_path"
+}
+
+scenario_bootstrap() {
+  local root="$1" users="$2" twig="$3" base="$4" noninteractive="$5" editor="$6"
+  local mc_bin="$root/mob-consensus"
+  local leader
+  leader="$(awk '{print $1}' <<<"$users")"
+  local leader_repo="$root/$leader"
+
+  echo "$prog: bootstrap ($leader)" >&2
+  run git -C "$leader_repo" switch -c "$twig" "$base"
+  run git -C "$leader_repo" push -u origin "$twig"
+  run mc_run "$leader_repo" "$mc_bin" "$editor" "$noninteractive" -b "$twig"
+  assert_branch "$leader_repo" "$leader/$twig"
+  run git -C "$leader_repo" push -u origin "$leader/$twig"
+}
+
+scenario_join() {
+  local root="$1" users="$2" twig="$3" base="$4" noninteractive="$5" editor="$6"
+  local mc_bin="$root/mob-consensus"
+  local leader
+  leader="$(awk '{print $1}' <<<"$users")"
+
+  echo "$prog: join (others)" >&2
+  for u in $users; do
+    if [[ "$u" == "$leader" ]]; then
+      continue
+    fi
+    local repo="$root/$u"
+    run git -C "$repo" fetch origin
+    run git -C "$repo" switch -c "$twig" "origin/$twig"
+    run mc_run "$repo" "$mc_bin" "$editor" "$noninteractive" -b "$twig"
+    assert_branch "$repo" "$u/$twig"
+    run git -C "$repo" push -u origin "$u/$twig"
+  done
+}
+
+scenario_discovery() {
+  local root="$1" users="$2" twig="$3" base="$4" noninteractive="$5" editor="$6"
+  local mc_bin="$root/mob-consensus"
+  local leader
+  leader="$(awk '{print $1}' <<<"$users")"
+
+  local bob=""
+  for u in $users; do
+    if [[ "$u" != "$leader" ]]; then
+      bob="$u"
+      break
+    fi
+  done
+  if [[ -z "$bob" ]]; then
+    die "discovery scenario needs at least 2 users"
+  fi
+
+  echo "$prog: discovery (ahead/behind/diverged)" >&2
+
+  run git -C "$root/$bob" switch "$bob/$twig"
+  echo "bob change" >"$root/$bob/bob.txt"
+  run git -C "$root/$bob" add bob.txt
+  run git -C "$root/$bob" commit -m "Bob change"
+  run git -C "$root/$bob" push
+
+  local out
+  out="$( (cd "$root/$leader" && "$mc_bin") 2>&1 )"
+  assert_contains "$out" "remotes/origin/$bob/$twig is ahead"
+
+  out="$( (cd "$root/$bob" && "$mc_bin") 2>&1 )"
+  assert_contains "$out" "remotes/origin/$leader/$twig is behind"
+
+  run git -C "$root/$leader" switch "$leader/$twig"
+  echo "leader change" >"$root/$leader/leader.txt"
+  run git -C "$root/$leader" add leader.txt
+  run git -C "$root/$leader" commit -m "Leader change"
+  run git -C "$root/$leader" push
+
+  out="$( (cd "$root/$leader" && "$mc_bin") 2>&1 )"
+  assert_contains "$out" "remotes/origin/$bob/$twig has diverged"
+}
+
+scenario_merge() {
+  local root="$1" users="$2" twig="$3" base="$4" noninteractive="$5" editor="$6"
+  local mc_bin="$root/mob-consensus"
+  local leader
+  leader="$(awk '{print $1}' <<<"$users")"
+
+  local other=""
+  for u in $users; do
+    if [[ "$u" != "$leader" ]]; then
+      other="$u"
+      break
+    fi
+  done
+  if [[ -z "$other" ]]; then
+    die "merge scenario needs at least 2 users"
+  fi
+
+  echo "$prog: merge (clean + no-op)" >&2
+
+  run git -C "$root/$leader" switch "$leader/$twig"
+  run mc_run_confirm "$root/$leader" "$mc_bin" "$editor" "$noninteractive" "$other/$twig"
+
+  local msg
+  msg="$(git -C "$root/$leader" log -1 --pretty=%B)"
+  assert_contains "$msg" "Co-authored-by: $other <$other@example.com>"
+
+  run mc_run_confirm "$root/$leader" "$mc_bin" "$editor" "$noninteractive" "$other/$twig"
+}
+
+scenario_branch() {
+  local root="$1" users="$2" twig="$3" base="$4" noninteractive="$5" editor="$6"
+  local mc_bin="$root/mob-consensus"
+  local leader
+  leader="$(awk '{print $1}' <<<"$users")"
+  local leader_repo="$root/$leader"
+
+  echo "$prog: branch (-b idempotent + push advice)" >&2
+
+  run git -C "$leader_repo" switch "$twig"
+  local out
+  out="$(mc_run "$leader_repo" "$mc_bin" "$editor" "$noninteractive" -b "$twig" 2>&1)"
+  assert_branch "$leader_repo" "$leader/$twig"
+  assert_contains "$out" "git push -u origin $leader/$twig"
+
+  out="$(mc_run "$leader_repo" "$mc_bin" "$editor" "$noninteractive" -b "$twig" 2>&1)"
+  assert_branch "$leader_repo" "$leader/$twig"
+
+  # Force ambiguous push advice: 2 remotes + no upstream.
+  run_maybe git -C "$leader_repo" remote remove jj
+  run git -C "$leader_repo" remote add jj "$REMOTE"
+  run_maybe git -C "$leader_repo" branch --unset-upstream
+  out="$(mc_run "$leader_repo" "$mc_bin" "$editor" "$noninteractive" -b "$twig" 2>&1)"
+  assert_contains "$out" "git push -u <remote> $leader/$twig"
+  assert_contains "$out" "Available remotes:"
+
+  run git -C "$leader_repo" fetch origin
+  run git -C "$leader_repo" branch --set-upstream-to="origin/$leader/$twig" "$leader/$twig"
+  run git -C "$leader_repo" remote remove jj
+}
+
+scenario_dirty() {
+  local root="$1" users="$2" twig="$3" base="$4" noninteractive="$5" editor="$6"
+  local mc_bin="$root/mob-consensus"
+  local leader
+  leader="$(awk '{print $1}' <<<"$users")"
+
+  local other=""
+  for u in $users; do
+    if [[ "$u" != "$leader" ]]; then
+      other="$u"
+      break
+    fi
+  done
+  if [[ -z "$other" ]]; then
+    die "dirty scenario needs at least 2 users"
+  fi
+
+  local leader_repo="$root/$leader"
+  local other_repo="$root/$other"
+
+  echo "$prog: dirty (dirty-tree failures + -c)" >&2
+
+  # Ensure there's something to merge.
+  run git -C "$other_repo" switch "$other/$twig"
+  assert_dir "$other_repo"
+  mkdir -p "$other_repo/dirty"
+  echo "dirty-test other change" >"$other_repo/dirty/$other.txt"
+  run git -C "$other_repo" add "dirty/$other.txt"
+  run git -C "$other_repo" commit -m "Dirty test change ($other)"
+  run git -C "$other_repo" push
+
+  run git -C "$leader_repo" switch "$leader/$twig"
+  echo "dirty-test leader uncommitted change" >>"$leader_repo/README.md"
+
+  local out
+  if out="$(mc_run "$leader_repo" "$mc_bin" "$editor" "$noninteractive" "origin/$other/$twig" 2>&1)"; then
+    die "expected mob-consensus merge to fail on dirty tree"
+  fi
+  assert_contains "$out" "dirty"
+
+  run mc_run "$leader_repo" "$mc_bin" "$editor" "$noninteractive" -c "origin/$other/$twig"
+  assert_clean "$leader_repo"
+
+  local subjects
+  subjects="$(git -C "$leader_repo" log -2 --pretty=%s)"
+  assert_contains "$subjects" "mc-test auto commit"
+  assert_contains "$subjects" "mob-consensus merge from"
+}
+
+scenario_smartpush() {
+  local root="$1" users="$2" twig="$3" base="$4" noninteractive="$5" editor="$6"
+  local mc_bin="$root/mob-consensus"
+  local leader
+  leader="$(awk '{print $1}' <<<"$users")"
+
+  local other=""
+  for u in $users; do
+    if [[ "$u" != "$leader" ]]; then
+      other="$u"
+      break
+    fi
+  done
+  if [[ -z "$other" ]]; then
+    die "smartpush scenario needs at least 2 users"
+  fi
+
+  local leader_repo="$root/$leader"
+  local other_repo="$root/$other"
+
+  echo "$prog: smartpush (upstreamless push behavior)" >&2
+
+  run_maybe git -C "$leader_repo" remote remove jj
+
+  # Case 1: single remote, no upstream -> push -u should set upstream.
+  run git -C "$leader_repo" switch "$leader/$twig"
+  run_maybe git -C "$leader_repo" branch --unset-upstream
+
+  run git -C "$other_repo" switch "$other/$twig"
+  mkdir -p "$other_repo/smartpush"
+  echo "smartpush case1 ($other)" >"$other_repo/smartpush/case1.txt"
+  run git -C "$other_repo" add "smartpush/case1.txt"
+  run git -C "$other_repo" commit -m "Smartpush case1 ($other)"
+  run git -C "$other_repo" push
+
+  run mc_run "$leader_repo" "$mc_bin" "$editor" "$noninteractive" "origin/$other/$twig"
+  run git -C "$leader_repo" rev-parse --abbrev-ref --symbolic-full-name "@{u}"
+
+  # Case 2: multiple remotes, no upstream, no pushDefault -> smartPush should error.
+  run git -C "$leader_repo" remote add jj "$REMOTE"
+  run_maybe git -C "$leader_repo" branch --unset-upstream
+  git -C "$leader_repo" config --local --unset remote.pushDefault 2>/dev/null || true
+  git -C "$leader_repo" config --local --unset "branch.$leader/$twig.pushRemote" 2>/dev/null || true
+
+  run git -C "$other_repo" switch "$other/$twig"
+  echo "smartpush case2 ($other)" >"$other_repo/smartpush/case2.txt"
+  run git -C "$other_repo" add "smartpush/case2.txt"
+  run git -C "$other_repo" commit -m "Smartpush case2 ($other)"
+  run git -C "$other_repo" push
+
+  local out
+  if out="$(mc_run "$leader_repo" "$mc_bin" "$editor" "$noninteractive" "origin/$other/$twig" 2>&1)"; then
+    die "expected smartPush to fail with multiple remotes and no upstream"
+  fi
+  assert_contains "$out" "cannot push"
+  assert_contains "$out" "multiple remotes"
+  assert_contains "$out" "git push -u <remote>"
+
+  # Fix: configure remote.pushDefault and ensure the next merge pushes successfully.
+  run git -C "$leader_repo" config --local remote.pushDefault origin
+  run_maybe git -C "$leader_repo" branch --unset-upstream
+
+  run git -C "$other_repo" switch "$other/$twig"
+  echo "smartpush case2b ($other)" >"$other_repo/smartpush/case2b.txt"
+  run git -C "$other_repo" add "smartpush/case2b.txt"
+  run git -C "$other_repo" commit -m "Smartpush case2b ($other)"
+  run git -C "$other_repo" push
+
+  run mc_run "$leader_repo" "$mc_bin" "$editor" "$noninteractive" "origin/$other/$twig"
+  run git -C "$leader_repo" rev-parse --abbrev-ref --symbolic-full-name "@{u}"
+
+  run_maybe git -C "$leader_repo" config --local --unset remote.pushDefault
+  run git -C "$leader_repo" remote remove jj
+}
+
+scenario_multiremote_fetch() {
+  local root="$1" users="$2" twig="$3" base="$4" noninteractive="$5" editor="$6"
+  local mc_bin="$root/mob-consensus"
+  local leader
+  leader="$(awk '{print $1}' <<<"$users")"
+  local leader_repo="$root/$leader"
+
+  echo "$prog: multiremote-fetch (fetch selection + ambiguity errors)" >&2
+
+  run git -C "$leader_repo" switch "$leader/$twig"
+  run_maybe git -C "$leader_repo" remote remove jj
+  run git -C "$leader_repo" remote add jj "$REMOTE"
+  run_maybe git -C "$leader_repo" branch --unset-upstream
+
+  local out
+  if out="$( (cd "$leader_repo" && "$mc_bin") 2>&1 )"; then
+    die "expected discovery to fail with multiple remotes and no upstream"
+  fi
+  assert_contains "$out" "multiple remotes"
+
+  run git -C "$leader_repo" fetch origin
+  run git -C "$leader_repo" branch --set-upstream-to="origin/$leader/$twig" "$leader/$twig"
+  out="$( (cd "$leader_repo" && "$mc_bin") 2>&1 )"
+  assert_contains "$out" "Related branches and their diffs"
+
+  run git -C "$leader_repo" remote remove jj
+}
+
+scenario_converge() {
+  local root="$1" users="$2" twig="$3" base="$4" noninteractive="$5" editor="$6"
+  local mc_bin="$root/mob-consensus"
+  local leader
+  leader="$(awk '{print $1}' <<<"$users")"
+  local leader_repo="$root/$leader"
+
+  local others=()
+  for u in $users; do
+    if [[ "$u" == "$leader" ]]; then
+      continue
+    fi
+    others+=("$u")
+  done
+  if [[ ${#others[@]} -lt 1 ]]; then
+    die "converge scenario needs at least 2 users"
+  fi
+
+  echo "$prog: converge (multi-user file edits + merges)" >&2
+
+  # Each user makes a real file change and pushes.
+  for u in $users; do
+    local repo="$root/$u"
+    run git -C "$repo" switch "$u/$twig"
+    mkdir -p "$repo/converge"
+    echo "hello from $u" >"$repo/converge/$u.txt"
+    run git -C "$repo" add "converge/$u.txt"
+    run git -C "$repo" commit -m "Converge change ($u)"
+    run git -C "$repo" push
+  done
+
+  # Leader merges each other user branch onto the leader branch.
+  run git -C "$leader_repo" switch "$leader/$twig"
+  for u in "${others[@]}"; do
+    run mc_run_confirm "$leader_repo" "$mc_bin" "$editor" "$noninteractive" "$u/$twig"
+    assert_file "$leader_repo/converge/$u.txt"
+  done
+
+  # Others merge the leader branch; trees should converge.
+  for u in "${others[@]}"; do
+    local repo="$root/$u"
+    run git -C "$repo" switch "$u/$twig"
+    run mc_run_confirm "$repo" "$mc_bin" "$editor" "$noninteractive" "$leader/$twig"
+    for peer in $users; do
+      assert_file "$repo/converge/$peer.txt"
+    done
+  done
+
+  for peer in $users; do
+    assert_file "$leader_repo/converge/$peer.txt"
+  done
+
+  # Verify each user's discovery output reports no diffs vs peers (synced).
+  for u in $users; do
+    local repo="$root/$u"
+    run git -C "$repo" switch "$u/$twig"
+    local out
+    out="$( (cd "$repo" && "$mc_bin") 2>&1 )"
+    for peer in $users; do
+      if [[ "$peer" == "$u" ]]; then
+        continue
+      fi
+      assert_contains "$out" "remotes/origin/$peer/$twig is synced"
+    done
+  done
+}
+
+cmd_coverage() {
+  local root=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --root)
+        root="${2:-}"; shift 2 ;;
+      -h|--help)
+        usage; exit 0 ;;
+      *)
+        die "unknown coverage flag: $1" ;;
+    esac
+  done
+
+  if [[ -z "$root" ]]; then
+    die "--root is required for coverage"
+  fi
+  if [[ ! -d "$root" ]]; then
+    die "root does not exist: $root"
+  fi
+
+  root="$(canonical_dir "$root")"
+  [[ -f "$root/$root_marker" ]] || die "not a harness root (missing $root/$root_marker): $root"
+  read_env "$root"
+
+  local src_root
+  src_root="$(canonical_dir "$(repo_root)")"
+  if [[ "$root" == "$src_root" || "$root" == "$src_root/"* ]]; then
+    die "--root must not be inside the mob-consensus source repo ($src_root)"
+  fi
+
+  mkdir -p "$root/gocache" "$root/gomodcache"
+  local cov_out="$root/coverage.out"
+  local cov_html="$root/coverage.html"
+  local cov_func="$root/coverage.func.txt"
+  local cov_total="$root/coverage.total.txt"
+  local cov_zero="$root/coverage.zero.txt"
+  local cov_low="$root/coverage.low.txt"
+  local cov_tmp="$cov_out.tmp"
+  mkdir -p "$root/gotmp"
+
+  rm -f "$cov_out" "$cov_html" "$cov_func" "$cov_total" "$cov_zero" "$cov_low" "$cov_tmp"
+
+  echo "$prog: writing coverage to:" >&2
+  echo "  $cov_out" >&2
+  echo "  $cov_html" >&2
+  echo "  $cov_func" >&2
+  echo "  $cov_total" >&2
+  echo "  $cov_zero" >&2
+  echo "  $cov_low" >&2
+
+  local test_rc="0"
+  if (cd "$src_root" && env GOCACHE="$root/gocache" GOMODCACHE="$root/gomodcache" GOTMPDIR="$root/gotmp" TMPDIR="$root/gotmp" GOFLAGS="-mod=readonly" go test -coverprofile="$cov_tmp" ./...) 1>&2; then
+    :
+  else
+    test_rc="$?"
+    echo "$prog: go test failed (exit $test_rc); attempting to generate coverage reports anyway" >&2
+  fi
+  if [[ ! -s "$cov_tmp" ]]; then
+    echo "$prog: no coverage profile was produced ($cov_tmp)" >&2
+    if [[ "$test_rc" != "0" ]]; then
+      return "$test_rc"
+    fi
+    return 1
+  fi
+  if ! head -n 1 "$cov_tmp" | grep -Eq '^mode:'; then
+    echo "$prog: invalid coverage profile (missing mode header): $cov_tmp" >&2
+    if [[ "$test_rc" != "0" ]]; then
+      return "$test_rc"
+    fi
+    return 1
+  fi
+  mv "$cov_tmp" "$cov_out"
+
+  (cd "$src_root" && env GOCACHE="$root/gocache" GOMODCACHE="$root/gomodcache" GOTMPDIR="$root/gotmp" TMPDIR="$root/gotmp" GOFLAGS="-mod=readonly" go tool cover -html="$cov_out" -o "$cov_html") 1>&2
+
+  echo "+ (cd \"$src_root\" && env ... go tool cover -func=\"$cov_out\" >\"$cov_func\")" >&2
+  (cd "$src_root" && env GOCACHE="$root/gocache" GOMODCACHE="$root/gomodcache" GOTMPDIR="$root/gotmp" TMPDIR="$root/gotmp" GOFLAGS="-mod=readonly" go tool cover -func="$cov_out" >"$cov_func") 2>&1
+
+  awk '/^total:/ {print; found=1} END {if(!found) exit 1}' "$cov_func" >"$cov_total"
+  awk '$1 != "total:" && $NF == "0.0%" {print}' "$cov_func" >"$cov_zero"
+  awk '$1 != "total:" && $NF ~ /%$/ {p=$NF; sub(/%$/, "", p); if(p+0 < 50.0) print}' "$cov_func" >"$cov_low"
+
+  if [[ "$test_rc" != "0" ]]; then
+    echo "$prog: coverage reports generated, but tests failed (exit $test_rc)" >&2
+    return "$test_rc"
+  fi
+}
+
+cmd_run() {
+  local root=""
+  local users=""
+  local twig=""
+  local base=""
+  local scenario="all"
+  local noninteractive=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --root)
+        root="${2:-}"; shift 2 ;;
+      --users)
+        users="${2:-}"; shift 2 ;;
+      --twig)
+        twig="${2:-}"; shift 2 ;;
+      --base)
+        base="${2:-}"; shift 2 ;;
+      --scenario)
+        scenario="${2:-}"; shift 2 ;;
+      --interactive)
+        noninteractive="0"; shift ;;
+      --noninteractive)
+        noninteractive="1"; shift ;;
+      -h|--help)
+        usage; exit 0 ;;
+      *)
+        die "unknown run flag: $1" ;;
+    esac
+  done
+
+  if [[ -z "$root" ]]; then
+    die "--root is required for run"
+  fi
+  if [[ ! -d "$root" ]]; then
+    die "root does not exist: $root"
+  fi
+
+  root="$(canonical_dir "$root")"
+  [[ -f "$root/$root_marker" ]] || die "not a harness root (missing $root/$root_marker): $root"
+  read_env "$root"
+
+  local src_root
+  src_root="$(canonical_dir "$(repo_root)")"
+  if [[ "$root" == "$src_root" || "$root" == "$src_root/"* ]]; then
+    die "--root must not be inside the mob-consensus source repo ($src_root)"
+  fi
+
+  if [[ -z "$users" ]]; then
+    users="${USERS:-alice bob carol}"
+  fi
+  if [[ -z "$twig" ]]; then
+    twig="${TWIG:-feature-x}"
+  fi
+  if [[ -z "$base" ]]; then
+    base="${BASE:-main}"
+  fi
+  assert_safe_branch_name "TWIG" "$twig"
+  assert_safe_branch_name "BASE" "$base"
+  for u in $users; do
+    assert_safe_username "$u"
+  done
+
+  local editor="${EDITOR:-$root/git-editor.sh}"
+  if [[ -z "$noninteractive" ]]; then
+    noninteractive="${NONINTERACTIVE:-1}"
+  fi
+  if [[ "$noninteractive" == "1" && ! -x "$editor" ]]; then
+    write_editor "$editor"
+  fi
+
+  case "$scenario" in
+    all)
+      scenario_bootstrap "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      scenario_join "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      scenario_discovery "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      scenario_merge "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      scenario_branch "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      scenario_dirty "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      scenario_smartpush "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      scenario_multiremote_fetch "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      scenario_converge "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      ;;
+    bootstrap)
+      scenario_bootstrap "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      ;;
+    join)
+      scenario_join "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      ;;
+    discovery)
+      scenario_discovery "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      ;;
+    merge)
+      scenario_merge "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      ;;
+    branch)
+      scenario_branch "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      ;;
+    dirty)
+      scenario_dirty "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      ;;
+    smartpush)
+      scenario_smartpush "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      ;;
+    multiremote-fetch)
+      scenario_multiremote_fetch "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      ;;
+    converge)
+      scenario_converge "$root" "$users" "$twig" "$base" "$noninteractive" "$editor"
+      ;;
+    *)
+      die "unknown scenario: $scenario"
+      ;;
+  esac
+}
+
+cmd_all() {
+  local root=""
+  local users="alice bob carol"
+  local twig="feature-x"
+  local base="main"
+  local noninteractive="1"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --root)
+        root="${2:-}"; shift 2 ;;
+      --users)
+        users="${2:-}"; shift 2 ;;
+      --twig)
+        twig="${2:-}"; shift 2 ;;
+      --base)
+        base="${2:-}"; shift 2 ;;
+      --interactive)
+        noninteractive="0"; shift ;;
+      --noninteractive)
+        noninteractive="1"; shift ;;
+      -h|--help)
+        usage; exit 0 ;;
+      *)
+        die "unknown all flag: $1" ;;
+    esac
+  done
+
+  local harness_root
+  harness_root="$(cmd_harness --root "${root:-}" --users "$users" --twig "$twig" --base "$base" $([[ "$noninteractive" == "1" ]] && echo --noninteractive || echo --interactive))"
+  cmd_run --root "$harness_root" --users "$users" --twig "$twig" --base "$base" --scenario all $([[ "$noninteractive" == "1" ]] && echo --noninteractive || echo --interactive)
+  echo "$prog: OK (harness root: $harness_root)" >&2
+}
+
+main() {
+  local cmd="${1:-}"
+  if [[ "$cmd" == "-h" || "$cmd" == "--help" || -z "$cmd" ]]; then
+    usage
+    exit 0
+  fi
+
+  shift || true
+  case "$cmd" in
+    init)
+      cmd_init "$@" ;;
+    harness)
+      cmd_harness "$@" ;;
+    run)
+      cmd_run "$@" ;;
+    all)
+      cmd_all "$@" ;;
+    coverage)
+      cmd_coverage "$@" ;;
+    *)
+      if [[ $# -eq 1 ]]; then
+        # Back-compat: mc-test REPO_PATH USERNAME
+        cmd_init "$cmd" "$1"
+      else
+        die "unknown command: $cmd"
+      fi
+      ;;
+  esac
+}
+
+main "$@"

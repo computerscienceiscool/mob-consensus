@@ -12,13 +12,18 @@ Constraints:
 - [ ] 003.4 Cover discovery mode output (ahead/behind/diverged/synced).
 - [ ] 003.5 Cover merge mode for clean/no-op merges (non-interactive).
 - [ ] 003.6 Add one “conflict merge fails cleanly” test (expected non-zero exit).
+- [ ] 003.7 Make system tests contribute to Go coverage (so `mc-test coverage --system` can report meaningful coverage for real workflows).
+- [ ] 003.8 Add a `scripts/mc-test coverage --system` mode that runs `go test -tags=system -coverprofile=... ./...` and writes `coverage.html`.
 
 ## Proposed structure
 
 - `system_test.go` (or `system/system_test.go`) guarded by a build tag:
   - `//go:build system`
   - Run with: `go test -tags=system ./...`
-- Use `exec.Command` to run `git` and the built `mob-consensus` binary with `cmd.Dir` pointing at each clone.
+- Prefer calling `run(ctx, args, stdout, stderr)` **in-process** so the tests count toward `-coverprofile`.
+  - Note: current code shells out to `git` without setting `cmd.Dir`, so in-process tests will need to `os.Chdir(repoDir)` (serial tests),
+    or we should refactor git helpers to accept a repo dir (better long-term).
+- Use `exec.Command` to run `git` with `cmd.Dir` pointing at each clone.
 - Use `t.TempDir()` and a **local bare repo** as `origin` to avoid network/credentials.
 
 ## Making merge mode non-interactive (without new flags)
@@ -37,12 +42,12 @@ This avoids prompts, avoids requiring `vimdiff` to be installed, and makes `git 
 
 1) **Branch creation (no push required)**
 - Arrange: in `alice/`, create `feature-x` from `main`.
-- Act: run `USER=alice mob-consensus -b feature-x`.
+- Act: run `mob-consensus -b feature-x`.
 - Assert: current branch is `alice/feature-x`; stdout contains a `git push -u` suggestion.
 
 2) **Discovery statuses**
 - Arrange: make/push commits such that `bob/feature-x` is ahead; then create diverged histories.
-- Act: run `USER=alice mob-consensus`.
+- Act: run `mob-consensus`.
 - Assert: output contains “is ahead”, “is behind”, and “has diverged” in the expected scenarios.
 
 3) **Merge no-op is success**
@@ -63,4 +68,3 @@ This avoids prompts, avoids requiring `vimdiff` to be installed, and makes `git 
 ## Follow-ups
 
 If automated merge testing remains brittle, prefer implementing TODO 001.6 so tests can run with explicit flags like `--no-tools` and `--no-edit` (or an `--editor` override) rather than depending on git config tricks.
-

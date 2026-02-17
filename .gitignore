@@ -17,6 +17,9 @@ coverage.*
 *.coverprofile
 profile.cov
 
+# Temp lock files
+*.lock
+
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
@@ -26,9 +29,6 @@ go.work.sum
 
 # env file
 .env
-
-# Lock files
-*.lock
 
 # Editor/IDE
 # .idea/
