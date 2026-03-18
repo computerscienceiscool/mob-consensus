@@ -11,6 +11,7 @@ This list is sorted by priority (not number). TODO numbers are stable; do not re
 - [ ] 012 - LLM-assisted review and human approval (`TODO/012-llm-assisted-review-and-approval.md`)
 - [ ] 002 - System test harness + manual plan (`TODO/002-system-test-harness.md`)
 - [ ] 003 - Automated system testing plan (`TODO/003-automated-system-test-plan.md`)
+- [ ] J016 - Team notifications via ntfy (cswg 020) (`TODO/J016-team-notifications-ntfy.md`)
 - [ ] 007 - Integrate JJ fork changes (`TODO/007-integrate-jj-fork-changes.md`)
 - [ ] 008 - Support fork-based collaboration (`TODO/008-support-fork-remotes.md`)
 - [x] 001 - Rewrite mob-consensus in Go (`TODO/001-rewrite-mob-consensus-in-go.md`)

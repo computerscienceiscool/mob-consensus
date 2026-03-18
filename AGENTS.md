@@ -25,9 +25,32 @@ Notes: the tool runs `git fetch`, uses `git mergetool`/`git difftool` (defaultin
 - For shell changes, run `bash -n x/mob-consensus` and include a short manual repro in the PR description.
 
 ## TODO Tracking
-- Track work in `TODO/` and keep an index at `TODO/TODO.md`.
-- Number TODOs with 3 digits (e.g., `005`), do not renumber, and sort the index by priority (not number).
-- In each `TODO/*.md`, use numbered checkboxes like `- [ ] 005.1 describe subtask`.
+
+Track work in `TODO/` with an index at `TODO/TODO.md`; number using letter-prefixed IDs; don't renumber; sort by priority.
+
+### Determining YOUR prefix
+
+Run `git config user.name` to see your git username. Your TODO prefix is the **FIRST LETTER** (uppercase) of that name.
+
+Examples:
+- `git config user.name` → "Alice" → use prefix **A** (create A001, A002, etc.)
+- `git config user.name` → "Bob" → use prefix **B** (create B001, B002, etc.)
+- `git config user.name` → "Sam" → use prefix **S** (create S001, S002, etc.)
+
+### TODO ID format
+
+- Use `LNNN` format: letter prefix + 3 digits (e.g., A015, B016, S023)
+- The prefix is based on who **created** that TODO entry
+- Keep integer parts globally unique during transition
+
+### Transition from old format
+
+- When bulk-renaming existing TODO files to add prefixes, use `git mv` in one commit without mixing other work
+
+### Usage
+
+- Mark completion with checkboxes: `- [ ] A005 - ...` → `- [x] A005 - ...`
+- Legacy: root `TODO.md` exists for historical reference; update `TODO/TODO.md` going forward
 
 ## Commit & Pull Request Guidelines
 - Keep commit messages short and imperative; existing history often uses a `mob-consensus:` prefix for script changes.
