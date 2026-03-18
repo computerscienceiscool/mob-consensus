@@ -34,6 +34,70 @@ without requiring Discord, SMS, email, or any accounts/API keys.
 Note: notifications go in the *callers* of `ensureClean()`, not inside it,
 so each caller has proper context for the message.
 
+## Integration plan (pending architect review)
+
+To wire in notifications, three changes are needed:
+
+### 1. Add notifier to options struct (main.go)
+
+Add a `notifier Notifier` field to the `options` struct.
+
+### 2. Create notifier in CLI handlers (cli.go)
+
+In each Cobra `RunE` handler that calls runMerge/runStart/runJoin, set:
+
+```go
+opts.notifier = newNotifier(cmd.Context())
+```
+
+### 3. Add Notify calls at each event site (main.go)
+
+**a) runMerge — after successful smartPush (line ~1251):**
+
+```go
+opts.notifier.Notify(ctx, Event{
+    Type:    EventMerged,
+    User:    user,
+    Twig:    twigFromBranch(currentBranch),
+    Branch:  currentBranch,
+    Message: fmt.Sprintf("%s merged %s and pushed", user, mergeTarget),
+})
+```
+
+**b) runStart — after runGitPlan returns successfully (line ~905):**
+
+```go
+opts.notifier.Notify(ctx, Event{
+    Type:    EventStarted,
+    User:    user,
+    Twig:    twig,
+    Branch:  userBranch,
+    Message: fmt.Sprintf("%s started twig %s", user, twig),
+})
+```
+
+**c) runJoin — after runGitPlan returns successfully (line ~1007):**
+
+```go
+opts.notifier.Notify(ctx, Event{
+    Type:    EventJoined,
+    User:    user,
+    Twig:    twig,
+    Branch:  userBranch,
+    Message: fmt.Sprintf("%s joined twig %s", user, twig),
+})
+```
+
+**d) Auto-commit callers — after ensureClean + smartPush succeeds:**
+
+The caller (not ensureClean itself) notifies with `EventAutoCommitted`,
+since each caller knows its own context for the message.
+
+### Note
+
+The notifier is a no-op when `mob-consensus.ntfyTopic` is not set in
+git config, so wiring the calls in has zero effect until configured.
+
 ## Subtasks
 
 - [ ] J016.1 — Notifier interface + ntfyNotifier implementation (cswg 020.2)
