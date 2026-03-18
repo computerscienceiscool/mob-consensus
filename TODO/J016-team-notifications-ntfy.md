@@ -116,6 +116,6 @@ git config, so wiring the calls in has zero effect until configured.
   - [x] J016.3.4 — Empty message falls back to event type (TestNtfyNotifierEmptyMessageFallback)
   - [x] J016.3.5 — Default server is ntfy.sh (TestNewNotifier/DefaultServer)
   - [x] J016.3.6 — Custom server from git config (TestNewNotifier/WithTopicAndServer)
-- [ ] J016.4 — Document configuration in `usage.tmpl` (cswg 020.6)
+- [x] J016.4 — Document configuration in `usage.tmpl` (cswg 020.6) — done (12b360b), pending Steve's review
 - [ ] J016.5 — Git branch overlap detection in discovery (cswg 020.12) — future, depends on overlap detection design
 - [ ] J016.6 — Repo-tracked config (cswg 020.9) — future, blocked on mob-consensus TODO 008
