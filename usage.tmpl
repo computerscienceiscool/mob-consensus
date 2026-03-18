@@ -103,3 +103,17 @@ Flags:
   -F force run even if not on a <user>/ branch
   -n no automatic push after commit
   -c commit existing uncommitted changes
+
+Notifications (optional):
+  Configure ntfy push notifications so collaborators are notified of
+  merges, joins, starts, and auto-commits. No accounts or API keys needed.
+
+  Enable for this repo:
+    git config --local mob-consensus.ntfyTopic MY_TEAM_TOPIC
+
+  Optional settings:
+    git config --local mob-consensus.ntfyServer https://ntfy.example.com  # default: https://ntfy.sh
+    git config --local mob-consensus.ntfyEnabled false                    # disable without removing topic
+
+  Subscribe:
+    Install the ntfy app or visit https://ntfy.sh/MY_TEAM_TOPIC in a browser.

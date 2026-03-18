@@ -100,19 +100,22 @@ git config, so wiring the calls in has zero effect until configured.
 
 ## Subtasks
 
-- [ ] J016.1 — Notifier interface + ntfyNotifier implementation (cswg 020.2)
-  - [ ] J016.1.1 — Define `Notifier` interface and `Event` type
-  - [ ] J016.1.2 — Implement `ntfyNotifier`: read git config, async POST with 5s timeout
-  - [ ] J016.1.3 — Constructor returns ntfyNotifier or no-op based on config
+- [x] J016.1 — Notifier interface + ntfyNotifier implementation (cswg 020.2) — done in notify.go (b6228af)
+  - [x] J016.1.1 — Define `Notifier` interface and `Event` type
+  - [x] J016.1.2 — Implement `ntfyNotifier`: read git config, async POST with 5s timeout
+  - [x] J016.1.3 — Constructor returns ntfyNotifier or no-op based on config
 - [ ] J016.2 — Add notification call sites (cswg 020.3)
   - [ ] J016.2.1 — After merge + push in `runMerge`
   - [ ] J016.2.2 — After `runStart` completes
   - [ ] J016.2.3 — After `runJoin` completes
   - [ ] J016.2.4 — After auto-commit + push (callers of `ensureClean`)
-- [ ] J016.3 — Unit tests (cswg 020.4)
-  - [ ] J016.3.1 — No-op when topic is not configured
-  - [ ] J016.3.2 — No-op when `ntfyEnabled` is `false`
-  - [ ] J016.3.3 — Sends correct POST when configured (use `httptest.NewServer`)
+- [x] J016.3 — Unit tests (cswg 020.4) — done in notify_test.go (a3fd264)
+  - [x] J016.3.1 — No-op when topic is not configured (TestNewNotifier/NoTopic)
+  - [x] J016.3.2 — No-op when `ntfyEnabled` is `false` (TestNewNotifier/Disabled)
+  - [x] J016.3.3 — Sends correct POST when configured (TestNtfyNotifierSendsRequest, uses httptest)
+  - [x] J016.3.4 — Empty message falls back to event type (TestNtfyNotifierEmptyMessageFallback)
+  - [x] J016.3.5 — Default server is ntfy.sh (TestNewNotifier/DefaultServer)
+  - [x] J016.3.6 — Custom server from git config (TestNewNotifier/WithTopicAndServer)
 - [ ] J016.4 — Document configuration in `usage.tmpl` (cswg 020.6)
 - [ ] J016.5 — Git branch overlap detection in discovery (cswg 020.12) — future, depends on overlap detection design
 - [ ] J016.6 — Repo-tracked config (cswg 020.9) — future, blocked on mob-consensus TODO 008
