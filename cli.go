@@ -183,6 +183,7 @@ func newMergeCmd(force, noPush, commitDirty *bool) *cobra.Command {
 			if err := requireUserBranch(opts.force, user, currentBranch); err != nil {
 				return usageError{Err: err}
 			}
+			opts.notifier = newNotifier(cmd.Context())
 			if err := fetchSuggestedRemote(cmd.Context(), opts.otherBranch); err != nil {
 				return err
 			}
@@ -321,6 +322,7 @@ func newInitCmd(commitDirty *bool) *cobra.Command {
 				plan:        flags.plan,
 				dryRun:      flags.dryRun,
 				yes:         flags.yes,
+				notifier:    newNotifier(cmd.Context()),
 			}
 			return runInit(cmd.Context(), opts, user, currentBranch, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
@@ -358,6 +360,7 @@ func newStartCmd(commitDirty *bool) *cobra.Command {
 				plan:        flags.plan,
 				dryRun:      flags.dryRun,
 				yes:         flags.yes,
+				notifier:    newNotifier(cmd.Context()),
 			}
 			return runStart(cmd.Context(), opts, user, currentBranch, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
@@ -394,6 +397,7 @@ func newJoinCmd(commitDirty *bool) *cobra.Command {
 				plan:        flags.plan,
 				dryRun:      flags.dryRun,
 				yes:         flags.yes,
+				notifier:    newNotifier(cmd.Context()),
 			}
 			return runJoin(cmd.Context(), opts, user, currentBranch, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},

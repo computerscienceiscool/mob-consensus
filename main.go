@@ -72,6 +72,8 @@ type options struct {
 	dryRun bool
 	// yes accepts defaults and skips confirmation prompts.
 	yes    bool
+	// notifier sends team notifications on workflow events (merge, start, join).
+	notifier Notifier
 }
 
 // exitFunc exists so tests can stub process exit without terminating the test
@@ -902,7 +904,17 @@ func runStart(ctx context.Context, opts options, user, currentBranch string, std
 			},
 		},
 	}
-	return runGitPlan(ctx, opts, title, steps, stdout, stderr)
+	if err := runGitPlan(ctx, opts, title, steps, stdout, stderr); err != nil {
+		return err
+	}
+	opts.notifier.Notify(ctx, Event{
+		Type:    EventStarted,
+		User:    user,
+		Twig:    twig,
+		Branch:  userBranch,
+		Message: fmt.Sprintf("%s started twig %s", user, twig),
+	})
+	return nil
 }
 
 // runJoin implements the "next group member" onboarding flow:
@@ -1004,7 +1016,17 @@ func runJoin(ctx context.Context, opts options, user, currentBranch string, stdo
 			},
 		},
 	}
-	return runGitPlan(ctx, opts, title, steps, stdout, stderr)
+	if err := runGitPlan(ctx, opts, title, steps, stdout, stderr); err != nil {
+		return err
+	}
+	opts.notifier.Notify(ctx, Event{
+		Type:    EventJoined,
+		User:    user,
+		Twig:    twig,
+		Branch:  userBranch,
+		Message: fmt.Sprintf("%s joined twig %s", user, twig),
+	})
+	return nil
 }
 
 // runCreateBranch implements `mob-consensus branch create`.
@@ -1248,7 +1270,18 @@ func runMerge(ctx context.Context, opts options, currentBranch string, stdout io
 		fmt.Fprintln(stdout, "skipping automatic push -- don't forget to push later")
 		return nil
 	}
-	return smartPush(ctx)
+	if err := smartPush(ctx); err != nil {
+		return err
+	}
+	user := strings.SplitN(currentBranch, "/", 2)[0]
+	opts.notifier.Notify(ctx, Event{
+		Type:    EventMerged,
+		User:    user,
+		Twig:    twigFromBranch(currentBranch),
+		Branch:  currentBranch,
+		Message: fmt.Sprintf("%s merged %s and pushed", user, mergeTarget),
+	})
+	return nil
 }
 
 // ensureClean enforces a clean working tree before running an operation.
@@ -1282,7 +1315,21 @@ func ensureClean(ctx context.Context, opts options, requireClean bool, stdout io
 	if opts.noPush {
 		return nil
 	}
-	return smartPush(ctx)
+	if err := smartPush(ctx); err != nil {
+		return err
+	}
+	branch, _ := gitOutputTrimmed(ctx, "rev-parse", "--abbrev-ref", "HEAD")
+	user := strings.SplitN(branch, "/", 2)[0]
+	if opts.notifier != nil {
+		opts.notifier.Notify(ctx, Event{
+			Type:    EventAutoCommitted,
+			User:    user,
+			Twig:    twigFromBranch(branch),
+			Branch:  branch,
+			Message: fmt.Sprintf("%s committed dirty changes and pushed", user),
+		})
+	}
+	return nil
 }
 
 // smartPush pushes the current branch.
