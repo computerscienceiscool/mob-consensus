@@ -104,11 +104,11 @@ git config, so wiring the calls in has zero effect until configured.
   - [x] J016.1.1 — Define `Notifier` interface and `Event` type
   - [x] J016.1.2 — Implement `ntfyNotifier`: read git config, async POST with 5s timeout
   - [x] J016.1.3 — Constructor returns ntfyNotifier or no-op based on config
-- [ ] J016.2 — Add notification call sites (cswg 020.3)
-  - [ ] J016.2.1 — After merge + push in `runMerge`
-  - [ ] J016.2.2 — After `runStart` completes
-  - [ ] J016.2.3 — After `runJoin` completes
-  - [ ] J016.2.4 — After auto-commit + push (callers of `ensureClean`)
+- [x] J016.2 — Add notification call sites (cswg 020.3) — done in cli.go + main.go (5a9338f)
+  - [x] J016.2.1 — After merge + push in `runMerge`
+  - [x] J016.2.2 — After `runStart` completes
+  - [x] J016.2.3 — After `runJoin` completes
+  - [x] J016.2.4 — After auto-commit + push in `ensureClean`
 - [x] J016.3 — Unit tests (cswg 020.4) — done in notify_test.go (a3fd264)
   - [x] J016.3.1 — No-op when topic is not configured (TestNewNotifier/NoTopic)
   - [x] J016.3.2 — No-op when `ntfyEnabled` is `false` (TestNewNotifier/Disabled)
